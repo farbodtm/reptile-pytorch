@@ -4,104 +4,134 @@ from torch import nn, autograd as ag
 import matplotlib.pyplot as plt
 from copy import deepcopy
 
+from model import Model
+import dataset as dset
+
+# Args TODO make them arguments.
 seed = 0
+
 plot = True
-innerstepsize = 0.02 # stepsize in inner SGD
-innerepochs = 1 # number of epochs of each inner SGD
-outerstepsize0 = 0.1 # stepsize of outer optimization, i.e., meta-optimization
-niterations = 30000 # number of outer updates; each iteration we sample one task and update on it
 
-rng = np.random.RandomState(seed)
-torch.manual_seed(seed)
+num_classes = 5
+num_shots = 5
+train_shots = 15
 
-# Define task distribution
-x_all = np.linspace(-5, 5, 50)[:,None] # All of the x points
-ntrain = 10 # Size of training minibatches
-def gen_task():
-    "Generate classification problem"
-    phase = rng.uniform(low=0, high=2*np.pi)
-    ampl = rng.uniform(0.1, 5)
-    f_randomsine = lambda x : np.sin(x + phase) * ampl
-    return f_randomsine
+meta_batch_size = 5
+meta_iters = 20000
+meta_step_size = 0.1
 
-# Define model. Reptile paper uses ReLU, but Tanh gives slightly better results
-model = nn.Sequential(
-    nn.Linear(1, 64),
-    nn.Tanh(),
-    nn.Linear(64, 64),
-    nn.Tanh(),
-    nn.Linear(64, 1),
-)
+inner_batch_size = 10
+inner_iters = 8
+learning_rate = 0.00022
 
-def totorch(x):
+eval_inner_batch_size = 15
+eval_inner_iters = 88
+eval_interval = 100
+
+DATA_DIR="./data/miniimagenet"
+
+
+def to_tensor(x):
     return ag.Variable(torch.Tensor(x))
 
-def train_on_batch(x, y):
-    x = totorch(x)
-    y = totorch(y)
+def inner_train_step(model, batch):
+    x, y = zip(*batch)
+    x = to_tensor(x)
+    y = to_tensor(y)
+
     model.zero_grad()
     ypred = model(x)
-    loss = (ypred - y).pow(2).mean()
+    loss = model.criterion(ypred, y) 
     loss.backward()
-    for param in model.parameters():
-        param.data -= innerstepsize * param.grad.data
+    model.optimizer.step()
 
-def predict(x):
+def predict(x, labels=None):
     x = totorch(x)
-    return model(x).data.numpy()
+    out = model(x)
+    pred = torch.max(out, 1)[1].data.squeeze()
+    loss = None
+    if labels:
+        loss = model.criterion(out, labels) 
+    return pred, loss
+
+def meta_train_step(train_set,
+        model,
+        num_shots,
+        num_classes,
+        inner_batch_size,
+        inner_iters,
+        meta_step_size,
+        meta_batch_size):
+    weights_original = deepcopy(model.state_dict())
+    new_weights = []
+    for _ in range(meta_batch_size):
+        mini_dataset = dset.sample_mini_dataset(train_set, num_classes, num_shots)
+        weights_before = deepcopy(model.state_dict())
+        for batch in dset.mini_batches(mini_dataset, inner_batch_size, inner_iters, False):
+            inner_train_step(model, batch)
+        weights.append(deepcopy(model.state_dict()))
+
+    model.load_state_dict({ name: weights_before[name] for name in weights_before })
+    for weights in new_weights:
+        cur_weights = model.state_dict()
+        model.load_state_dict({name : 
+            cur_weights[name] + (weights[name] - cur_weights[name]) * meta_batch_size for name in cur_weights})
+
+
+def evaluate(dataset,
+        model,
+        num_shots,
+        num_classes,
+        inner_batch_size,
+        inner_iters):
+    weights_original = deepcopy(model.state_dict())
+    train_set, test_set = dset.split_train_test(
+            dset.sample_mini_dataset(dset, num_classes, num_shots+1))
+
+    weights_before = deepcopy(model.state_dict())
+    for batch in dset.mini_batches(train_set, inner_batch_size, inner_iters, False):
+        inner_train_step(model, batch)
+    
+    inputs, labels = zip(*test_set)
+    preds, loss = predict(inputs, labels)
+    num_correct = sum([(pred == sample[1] for pred, sample in zip(preds, test_set))])
+    acc = num_correct / num_classes
+
+    model.load_state_dict({ name: weights_before[name] for name in weights_before })
+    return num_correct, loss
+
 
 def main():
     """
     Load mini-imagenet and train a model.
     """
-    # Choose a fixed task and minibatch for visualization
-    f_plot = gen_task()
-    xtrain_plot = x_all[rng.choice(len(x_all), size=ntrain)]
+
+    rng = np.random.RandomState(seed)
+    torch.manual_seed(seed)
+    model = Model(num_classes, learning_rate)
+
+    train_set, val_set, test_set = dset.read_dataset(DATA_DIR)
 
     # Reptile training loop
-    for iteration in range(niterations):
-        weights_before = deepcopy(model.state_dict())
-        # Generate task
-        f = gen_task()
-        y_all = f(x_all)
-        # Do SGD on this task
-        inds = rng.permutation(len(x_all))
-        for _ in range(innerepochs):
-            for start in range(0, len(x_all), ntrain):
-                mbinds = inds[start:start+ntrain]
-                train_on_batch(x_all[mbinds], y_all[mbinds])
-        # Interpolate between current weights and trained weights from this task
-        # I.e. (weights_before - weights_after) is the meta-gradient
-        weights_after = model.state_dict()
-        print(weights_after)
-        exit()
-        outerstepsize = outerstepsize0 * (1 - iteration / niterations) # linear schedule
-        #outerstepsize = outerstepsize0 # linear schedule
-        model.load_state_dict({name : 
-            weights_before[name] + (weights_after[name] - weights_before[name]) * outerstepsize 
-            for name in weights_before})
+    for i in range(meta_iters):
+        frac_done = i / meta_iters
+        current_step_size = meta_step_size * (1 - frac_done)
+        meta_train_step(train_set, model, num_shots, num_classes, inner_batch_size, inner_iters, current_step_size, meta_batch_size)
 
-        # Periodically plot the results on a particular task and minibatch
-        if plot and iteration==0 or (iteration+1) % 1000 == 0:
-            plt.cla()
-            f = f_plot
-            weights_before = deepcopy(model.state_dict()) # save snapshot before evaluation
-            plt.plot(x_all, predict(x_all), label="pred after 0", color=(0,0,1))
-            for inneriter in range(32):
-                train_on_batch(xtrain_plot, f(xtrain_plot))
-                if (inneriter+1) % 8 == 0:
-                    frac = (inneriter+1) / 32
-                    plt.plot(x_all, predict(x_all), label="pred after %i"%(inneriter+1), color=(frac, 0, 1-frac))
-            plt.plot(x_all, f(x_all), label="true", color=(0,1,0))
-            lossval = np.square(predict(x_all) - f(x_all)).mean()
-            plt.plot(xtrain_plot, f(xtrain_plot), "x", label="train", color="k")
-            plt.ylim(-4,4)
-            plt.legend(loc="lower right")
-            plt.pause(0.01)
-            model.load_state_dict(weights_before) # restore from snapshot
+        # Periodically evaluate
+        if i % eval_interval == 0:
+            accs = []
+            losses = []
+            for dataset in [train_set, test_set]:
+                acc, loss = evaluate(t, model, num_shots, num_classes, inner_batch_size, inner_iters)
+                accs.append(ncorrect / num_classes)
+                losses.append(loss)
+
             print(f"-----------------------------")
-            print(f"iteration               {iteration+1}")
-            print(f"loss on plotted curve   {lossval:.3f}") # would be better to average loss over a set of examples, but this is optimized for brevity
+            print(f"iteration               {i+1}")
+            print(f"accuracy train {accs[0]:.3f} test: {accs[1]:.3f}")
+            print(f"loss train:{losses[0]:.3f} test: {losses[1]:.3f}")
+    torch.save({'state_dict': model.state_dict(), 'optimizer': model.optimizer.state_dict()}, 'model.pth')
 
 if __name__ == '__main__':
     main()
