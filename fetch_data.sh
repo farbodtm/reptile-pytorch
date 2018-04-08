@@ -26,7 +26,8 @@ if [ ! -d data/miniimagenet ]; then
             for entry in $(cat metadata/miniimagenet/$subset/$csv); do
                 name=$(echo "$entry" | cut -f 1 -d ,)
                 range=$(echo "$entry" | cut -f 2 -d ,)
-                curl -s -H "range: bytes=$range" $IMAGENET_URL > "$dst_dir/$name" &
+                echo $range
+                curl -H "range: bytes=$range" $IMAGENET_URL > "$dst_dir/$name"
             done
             wait
         done
