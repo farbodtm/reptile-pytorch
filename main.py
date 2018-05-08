@@ -105,10 +105,6 @@ def main():
     train_set, val_set, test_set = dset.read_dataset(DATA_DIR)
     print "Dataset loaded."
 
-    #print "accuracy on test_set embedding: {}".format(reptile.test_embedding(test_set, net, criterion, optimizer, **e_kwargs))
-    # print "accuracy on test_set: {}".format(reptile.test(test_set, net, criterion, optimizer, **e_kwargs))
-    #return
-
     if not is_eval:
         reptile.train(train_set, val_set, net, model_name, criterion, optimizer, **t_kwargs)
         torch.save(net.state_dict(), './models/model-{}.pth'.format(args.model_name))

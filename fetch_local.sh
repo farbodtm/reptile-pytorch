@@ -3,7 +3,7 @@
 # Fetch Mini-ImageNet from https://github.com/openai/supervised-reptile.
 #
 
-imagenet=/media/robotvision2/H/vijay_imagenet/train/
+imagenet=PATH-TO-IMAGENET-TRAIN-SET
 
 set -e
 
