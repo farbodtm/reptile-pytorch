@@ -3,7 +3,7 @@ Reptile
 
 A PyTorch version of OpenAI's REPTILE meta-learning algorithm. Replicates the paper's Mini-Imagenet few-shot learning experiments.
 
-###Roadmap
+### Roadmap
 
 - [ ] Add TensorboardX
 - [ ] Implement MAML and FOMAML
